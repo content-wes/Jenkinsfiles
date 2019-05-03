@@ -1,0 +1,155 @@
+#!groovy
+JOB_TEMPLATE = "PCF OUTREACH PUSH"
+ARTIFACTORY_BASE = 'https://artifacts.west.com/artifactory'
+def SPARK_ROOMS = [[spaceId: 'bae74460-2003-11e9-93f5-79144611fddb', spaceName: 'CXMO Builds']]
+SPARK_CREDENTIAL_ID = 'spark-CXMO-Jenkins-Bot-token'
+DEFAULT_EMAIL = ''
+DEFAULT_MVN_GROUPID = 'com.west.cxm'
+api_endpoint_dev = 'api.sys.pcfdev.one.west.com'
+api_endpoint_ops = 'api.sys.den06.pcf.one.west.com'
+api_endpoint = api_endpoint_dev
+space_subdomain = ''
+app_version = ''
+app_links = ''
+pipeline {
+    agent {
+        label 'RHEL7'
+    }
+    tools {
+        jdk 'openjdk-1.8'
+    }
+    environment {
+        JAVA_HOME="${tool 'openjdk-1.8'}"
+        PATH="${JAVA_HOME}/bin:${PATH}"
+    }
+    options {
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr:'5'))
+    }
+    parameters {
+        choice(name: 'space', choices: ['Dev','Test','Stage','Production'], description: 'PCF Space')
+        choice(name: 'blue_green_route', choices: ['1','2','3','4'], description: '1- Deletes old app; 2 - Leaves old app, but removes its routes; 3 - Leaves old app, adds temp route to new app; 4 - Routes 50% to old and new app')
+        string(name: 'app_name', defaultValue: '', description: 'OPTIONAL: Setting a value here will override the default behavior which uses the MVN_ARTIFACTID for the PCF application name.')
+        string(name: 'artifact_location', defaultValue: '', description: 'OPTIONAL: Setting a value here will override the default behavior which is to derive an URL based on the MVN_* parameters.')
+        string(name: 'manifest_file_location', defaultValue: '', description: 'OPTIONAL: Setting a value here will override the default behavior which is to derive an URL based on the MVN_* parameters.')
+        string(name: 'MVN_GROUPID', defaultValue: "${DEFAULT_MVN_GROUPID}", description: 'Maven Group ID of the deployable artifact')
+        string(name: 'MVN_ARTIFACTID', defaultValue: '', description: 'Maven Artifact ID -- also used as default app_name')
+        string(name: 'MVN_VERSION', defaultValue: '', description: 'Maven Version of the deployable artifact')
+        string(name: 'EMAIL_NOTIFICATION', defaultValue: "${DEFAULT_EMAIL}", description: 'OPTIONAL: Send a report somewhere when this job completes (note that whoever clicks the button is automatically notified).')
+        string(name: 'sso_passcode', defaultValue: '', description: 'OPTIONAL: Only required for deployments to Stage or Production')
+    }
+    stages {
+        stage ('Check Parameters') {
+            steps {
+                script {
+                    if ( app_name == '' ) {
+                        app_name = MVN_ARTIFACTID
+                    }
+                    if (MVN_VERSION.contains('SNAPSHOT')) {
+                        MVN_REPO = 'libs-snapshot'
+                    } else {
+                        MVN_REPO = 'libs-release'
+                    }
+                    REPO_SUB_DIR = MVN_GROUPID.replaceAll(/\./,'/')
+                    if ( artifact_location == '' ) {
+                        artifact_location = "${ARTIFACTORY_BASE}/${MVN_REPO}/${REPO_SUB_DIR}/${MVN_ARTIFACTID}/${MVN_VERSION}/${MVN_ARTIFACTID}-${MVN_VERSION}.jar"
+                    }
+                    if ( manifest_file_location == '' ) {
+                        manifest_file_location = "${ARTIFACTORY_BASE}/${MVN_REPO}/${REPO_SUB_DIR}/${MVN_ARTIFACTID}/${MVN_VERSION}/${MVN_ARTIFACTID}-${MVN_VERSION}-manifest.yml"
+                    }
+                    if ( (space == 'Stage') || (space == 'Production') ) {
+                        api_endpoint = api_endpoint_ops
+                        if ( sso_passcode == '' ) {
+                            currentBuild.result = 'ABORTED'
+                            error('Stage or Production space was selected, but sso_passcode was not specified')
+                        }
+                    }
+                    if (space == 'Dev') {
+                        space_subdomain = 'pcfdev'
+                        SPARK_ROOMS.add([spaceId: 'd87b3e80-2032-11e9-bf19-5da6656e5408', spaceName: 'CXMO Deploy Dev'])
+                    } else if (space == 'Test') {
+                        space_subdomain = 'pcftest'
+                        SPARK_ROOMS.add([spaceId: '33706c60-2002-11e9-8caf-f5ea15b160e7', spaceName: 'CXMO Deploy Test'])
+                    } else if (space == 'Stage') {
+                        space_subdomain = 'pcfstage'
+                        SPARK_ROOMS.add([spaceId: '33706c60-2002-11e9-8caf-f5ea15b160e7', spaceName: 'CXMO Deploy Test'])
+                    } else if (space == 'Production') {
+                        space_subdomain = 'pcf'
+                        SPARK_ROOMS.add([spaceId: '33706c60-2002-11e9-8caf-f5ea15b160e7', spaceName: 'CXMO Deploy Test'])
+                    }
+                    app_version = MVN_VERSION
+                    if (MVN_VERSION == '') {
+                        app_version = artifact_location.tokenize('/').last().replace('.jar', '').replace("${app_name}-", '')
+                    } else {
+                        app_version = MVN_VERSION
+                    }
+                }
+            }
+        }
+        stage ('PCF Deploy') {
+            when {
+                expression { app_name != '' }
+            }
+            steps {
+                script {
+                    echo "${app_name}"
+                    echo "${artifact_location}"
+                    echo "${manifest_file_location}"
+                    app_links = """
+App Name: ${app_name}<br>
+Version: ${app_version}<br>
+${app_name} artifacts:<br/>
+${artifact_location}<br/>
+${manifest_file_location}<br/>
+<br/><br/>
+${app_name} links:<br/>
+https://${app_name}.app.${space_subdomain}.one.west.com/actuator/info <br/>
+https://${app_name}.app.${space_subdomain}.one.west.com/swagger-ui.html <br/>
+"""
+                    ansibleTower(
+                        towerServer: 'tower',
+                        templateType: 'job',
+                        extraVars: "{'app_name': '${app_name}', 'space': '${space}', 'artifact_location': '${artifact_location}', 'manifest_file_location': '${manifest_file_location}', 'blue_green_route': '${blue_green_route}', 'api_endpoint': '${api_endpoint}', 'sso_passcode': '${sso_passcode}'}",
+                        jobTemplate: "${JOB_TEMPLATE}",
+                        importTowerLogs: true,
+                        inventory: "",
+                        jobTags: "",
+                        limit: "",
+                        removeColor: false,
+                        verbose: true,
+                        credential: "",
+                    )
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                htmlReport = """
+<b>Jenkins Job</b> <a href='${env.JOB_URL}'>${env.JOB_NAME}</a></br>
+Build ${env.BUILD_DISPLAY_NAME} ran for ${currentBuild.duration} ms on node ${env.NODE_NAME}[${env.EXECUTOR_NUMBER}] with labels (${env.NODE_LABELS})
+<p>
+Tower Job Template: ${JOB_TEMPLATE}<br>
+Blue/Green Route: ${blue_green_route}<br/>
+PCF Space: ${space}<br>
+Result: <a href='${env.BUILD_URL}'>${currentBuild.currentResult}</a><br/><br/>
+${app_links}
+<hr>
+"""
+                if (app_name != '') {
+                    sparkSend credentialsId: SPARK_CREDENTIAL_ID, messageType: 'html',
+                        message: htmlReport,
+                        spaceList: SPARK_ROOMS
+                    echo sh(returnStdout: true, script: 'env | sort')
+                    emailext to: "${EMAIL_NOTIFICATION}", 
+                        recipientProviders:  [requestor()],
+                        subject: "PCF Deploy ${space} ${currentBuild.currentResult} ${app_name} ${app_version}", 
+                        body: htmlReport,
+                        mimeType: 'text/html',
+                        attachLog: true
+                }
+            }
+        }
+    }
+}

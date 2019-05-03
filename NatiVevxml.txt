@@ -1,0 +1,52 @@
+import java.util.regex.*;
+library identifier: 'php-extensions@master', retriever: modernSCM(
+    [$class: 'GitSCMSource',
+    remote: 'git@repo.west.com:Enterprise-Communications/NativeVXML-Library-Pipeline.git'])
+
+def emailList = "OMH-WICAPPENGINEERING@west.com"
+def teamName = "AppEng"
+def qaTestingApprovalTimeInDays = 5
+def destinationPath = "/wic/sys/php5/extensions/wicStdVXML_cicd_test"
+
+def branchName = env.BRANCH_NAME
+def gitBranches = (branchName.startsWith("preprod") || branchName.startsWith("master"))
+def tagName = env.TAG_NAME
+def isPreprodTag =  init(tagName);
+
+try
+{
+    if( gitBranches || ((tagName == null) && (!gitBranches)))
+    {
+        def unitTestDependencies =
+        '''[{  "team_Name": "AppEng", "git_repo_name": "Naresh-Jenkins-Test", "tag_version": "v2.18", "directory": "wicstdvxml" },\
+            {  "team_Name": "AppEng", "git_repo_name": "Test-Deployment-NativeVXML-WicStd", "tag_version": "Latest", "directory": "wicstd" },\
+         	{  "team_Name": "AppEng", "git_repo_name": "Test-Deployment-NativeVXML-Wic", "tag_version": "Latest", "directory": "wic"  }
+        ]'''
+        runUnitTests(branchName,unitTestDependencies)
+        sonarQube()
+    }
+    else if(isPreprodTag)
+    {
+        Checkout()
+	    buildCode()
+	    packageCode(tagName)
+	    uploadToPreprodArtifactory(tagName,teamName)
+	    deployToPreprod(tagName,teamName,destinationPath)
+    }
+    else
+    {
+        Checkout()
+        preprodTestingApproval(tagName,emailList,qaTestingApprovalTimeInDays)
+        promoteArtifactToProduction(tagName,teamName)
+    }
+}
+
+catch (Exception e)
+{
+	currentBuild.result = 'FAILURE'
+	echo e.toString()
+}
+finally
+{
+	emailStandardStatus(emailList)
+}

@@ -1,0 +1,6 @@
+- name: run the playbook tasks on the localhost
+  hosts: 3.17.204.214
+  connection: ssh
+  become: yes
+  roles:
+    - role: webserver
