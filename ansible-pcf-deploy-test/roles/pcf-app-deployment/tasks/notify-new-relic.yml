@@ -1,0 +1,35 @@
+- name: Create a New Relic Deployment Marker
+  uri:
+    url: https://api.newrelic.com/v2/applications/{{ new_relic_app_id }}/deployments.json
+    method: POST
+    headers:
+       X-Api-Key: "{{ new_relic_api_key }}"
+       Content-Type: application/json
+    status_code: 201
+    body:
+      deployment:
+        revision: "{{ app_version }}"
+        changelog: Built version {{ app_version }}
+        description: Built version {{ app_version }}
+        user: "{{ new_relic_user_name }}"
+    body_format: json 
+  when:  new_relic_app_id is defined
+  
+- name: Send a New Relic Deployment Event to Insights
+  uri:
+    url: https://insights-collector.newrelic.com/v1/accounts/{{ new_relic_acct_id }}/events
+    method: POST
+    headers:
+       X-Insert-Key: "{{ new_relic_insights_key }}"
+       Content-Type: application/json
+    status_code: 200
+    body:
+      eventType: deployment
+      appId: "{{ new_relic_app_id }}"
+      appName: context-service
+      revision: "{{ app_version }}"
+      changelog: Built version {{ app_version }}
+      description: Built version {{ app_version }}
+      user: "{{ new_relic_user_name }}"
+    body_format: json 
+  when:  new_relic_acct_id is defined  

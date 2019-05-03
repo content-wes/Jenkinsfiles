@@ -1,0 +1,10 @@
+  - name: Rollback from route 3 deploy
+    debug: msg="Delete new app"
+
+  - name: Delete new green artifact
+    command: cf delete {{ app_name }}-green -f
+    when: color == "green"
+
+  - name: Delete new blue artifact
+    command: cf delete {{ app_name }}-blue -f
+    when: color == "blue"

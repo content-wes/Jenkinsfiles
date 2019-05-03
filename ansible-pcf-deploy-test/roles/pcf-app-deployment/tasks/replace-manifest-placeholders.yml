@@ -1,0 +1,11 @@
+  - name: Replace manifest placeholders
+    shell: |
+      sed -i -- 's/{color}/{{ color }}/g' '/var/tmp/{{ app_name }}/manifest.yml'
+      sed -i -- 's/{pcf_domain}/{{ pcf_domain }}/g' '/var/tmp/{{ app_name }}/manifest.yml'
+      sed -i -- 's/{api_endpoint}/{{ api_endpoint }}/g' '/var/tmp/{{ app_name }}/manifest.yml'
+      
+#  - name: Printing manifest file location and contents
+#    debug: 
+#      msg:
+#        - "file location - {{ manifest_file_location }}"
+#        - "{{lookup('file', '{{ manifest_file_location }}') }}"

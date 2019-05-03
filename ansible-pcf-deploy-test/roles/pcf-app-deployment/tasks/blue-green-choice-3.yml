@@ -1,0 +1,8 @@
+  - name: Keeping old artifact that takes all traffic; new artifact uploaded but will not take traffic 
+    debug: msg="All traffic will go to old artifact; a temporary route is mapped to new artifact for testing purposes"
+
+  - name: Mapping a temporary route to new app
+    command: cf map-route {{ app_name }}-{{ color }} app.pcf{{ domain_space }}.one.west.com -n {{ app_name }}-temp
+
+  - name: Unmapping artifact route
+    command: cf unmap-route {{ app_name }}-{{ color }} app.pcf{{ domain_space }}.one.west.com -n {{ app_name }}

@@ -1,0 +1,25 @@
+---
+  - name: Login to PCF
+    include: login.yml
+
+  - name: Determine space for domain name
+    set_fact: domain_space=""
+    when: space|lower=="prod"
+    
+  - name: Determine space for domain name
+    set_fact: domain_space={{ space }}
+    when: space|lower!="prod"
+    
+  - name: Print color of new app
+    debug: msg="Color {{ color }}"
+
+  - name: Print blue/green route choice to clean up from
+    debug: msg="Recovering from route {{ blue_green_route }}"
+    
+  - name: Rollback or clean up
+    include: rollback-{{ blue_green_route }}.yml
+    when: rollback == 'true'
+    
+  - name: Clean up for route
+    include: clean-up-route-{{ blue_green_route }}.yml
+    when: rollback == 'false'

@@ -1,0 +1,13 @@
+---
+  
+  - name: Login to PCF with username password
+    command: cf login -a {{api_endpoint}}  -u {{ lookup('ini', 'username section={{org}} file=crendentials.cfg') }} -p {{ lookup('ini', 'password section={{org}}  file=crendentials.cfg') }} -o {{org}} -s {{space}} --skip-ssl-validation
+    async: '{{ async_timeout|default(1000) }}'
+    poll: '{{ async_poll|default(10) }}'
+    when: sso_passcode is undefined or sso_passcode == ''
+
+  - name: Login to PCF with username ssocode
+    command: cf login -a {{api_endpoint}} -o {{org}} -s {{space}} --skip-ssl-validation --sso-passcode {{ sso_passcode }}
+    async: '{{ async_timeout|default(1000) }}'
+    poll: '{{ async_poll|default(10) }}'
+    when: sso_passcode is defined and sso_passcode != ''

@@ -1,0 +1,2 @@
+  - name: Load balance traffic between old and new
+    debug: msg="Traffic will be load balanced between old and new app"

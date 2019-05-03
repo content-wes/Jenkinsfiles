@@ -1,0 +1,13 @@
+  - name: Clean app tmp directory path
+    file:
+      state: absent
+      path: "/var/tmp/{{ app_name }}/"
+    
+  - name: Create tmp directory to check out manifest file
+    file: path=/var/tmp/{{ app_name }}/ state=directory
+        
+  - name: Download the manifest from artifactory
+    get_url:
+      url: "{{ manifest_file_location }}"  
+      dest: /var/tmp/{{ app_name }}/manifest.yml
+      force: yes

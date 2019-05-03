@@ -1,0 +1,7 @@
+  - name: Login to PCF with username password
+    command: cf login -a {{api_endpoint}}  -u {{user}} -p {{password}} -o {{org}} -s {{space}} --skip-ssl-validation
+    when: sso_passcode is undefined or sso_passcode == ''
+    
+  - name: Login to PCF with username ssocode
+    command: cf login -a {{api_endpoint}} -o {{org}} -s {{space}} --skip-ssl-validation --sso-passcode {{ sso_passcode }}
+    when: sso_passcode is defined and sso_passcode != ''

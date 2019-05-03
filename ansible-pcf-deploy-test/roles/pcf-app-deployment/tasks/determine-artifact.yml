@@ -1,0 +1,20 @@
+  - name: Creates directory
+    file: path=/var/tmp/{{ app_name }} state=directory
+
+  - name: Download the artifact from artifactory 
+    get_url:
+      url: "{{ artifact_location }}"  
+      dest: /var/tmp/{{ app_name }}/
+    
+  - name: Determine artifact name
+    shell: "find {{ app_name }}*.{{ packaging }}"
+    args:
+      chdir: "/var/tmp/{{ app_name }}"
+    register: determine_artifact
+    ignore_errors: yes
+    
+  - name: Set artifact full path
+    set_fact: artifact_full_path='/var/tmp/{{ app_name }}/{{ determine_artifact.stdout }}'
+
+  - name: Print path of artifact to be deployed 
+    debug: msg="Artifact deployed from {{ artifact_full_path }}"

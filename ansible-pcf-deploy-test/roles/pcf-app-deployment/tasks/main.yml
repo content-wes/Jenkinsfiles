@@ -1,0 +1,42 @@
+---  
+   
+  - name: Login to PCF
+    include: login.yml
+
+  - name: Determine color and set color fact
+    include: determine-color.yml
+
+  - name: Determine blue green route and set blue_green_route fact
+    include: determine-blue-green-route.yml
+
+  - name: Check out manifest file and replace placeholders and set manifest_file_location fact
+    include: determine-manifest-file.yml
+
+  - name: Print path of manifest file for deploy 
+    debug: msg="manifest from {{ manifest_file_location }}"
+    
+  - name: Replace placeholders in manifest
+    include: replace-manifest-placeholders.yml
+
+  - name: Check out artifact and set artifact_name and artifact_full_path facts
+    include: determine-artifact.yml
+
+  - name: Pushing artifact
+    command: cf push -f "/var/tmp/{{ app_name }}/manifest.yml" -p {{ artifact_full_path  }} -t 180
+    register: push_outcome
+    ignore_errors: true
+
+  - name:
+    include: blue-green-choice-{{ blue_green_route }}.yml
+    when: push_outcome is succeeded
+    
+  - name: Clean up
+    local_action: file path=/var/tmp/{{ app_name }} state=absent
+  
+  - name: Notify New Relic of successful build (only runs if new_relic_app_id is present)
+    include: notify-new-relic.yml
+    when: push_outcome is succeeded
+    
+  - name: Fail play if push failed
+    fail: msg="Push has failed. Hence, failing the play outcome"
+    when: push_outcome is failed

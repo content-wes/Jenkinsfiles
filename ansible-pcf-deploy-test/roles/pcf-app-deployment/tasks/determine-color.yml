@@ -1,0 +1,30 @@
+  - name: Check for blue app
+    shell: |
+      cf apps | grep -q "{{ app_name }}-blue"
+    register: blue_apps_present
+    ignore_errors: yes
+    
+  - name: Check for green app
+    shell: |
+      cf apps | grep -q "{{ app_name }}-green"
+    register: green_apps_present
+    ignore_errors: yes
+    
+  - name: Determine space to see if apps need to be deleted
+    set_fact: delete_an_app="true"
+    when: space|lower!="production" or space|lower!="stage"
+    
+  - name: Fail if blue and green app exists
+    fail: msg="Cannot proceed with deployment as blue and green deployment exists"
+    when: blue_apps_present|succeeded and green_apps_present|succeeded and {{ delete_an_app }}|lower!="true"
+
+  - name: Set blue deploy if first time or if green exists
+    set_fact: color="blue"
+    when: (blue_apps_present|failed) or delete_an_app!="true"
+
+  - name: Set green deploy if blue exists
+    set_fact: color="green"
+    when: (blue_apps_present|succeeded and green_apps_present|failed)
+
+  - name: Print deploy color
+    debug: msg="Deploying {{ color }}"

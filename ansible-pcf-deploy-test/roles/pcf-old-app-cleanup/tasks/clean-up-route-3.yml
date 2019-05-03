@@ -1,0 +1,16 @@
+  - name: Cleaning up from route 3
+    debug: msg="To clean up route 3, new app's route is fixed and old app is deleted"
+  
+  - name: Mapping route to new app
+    command: cf map-route {{ app_name }}-{{ color }} app.pcf{{ domain_space }}.one.west.com -n {{ app_name }}
+
+  - name: Unmapping temporary route to new app
+    command: cf unmap-route {{ app_name }}-{{ color }} app.pcf{{ domain_space }}.one.west.com -n {{ app_name }}-temp
+    
+  - name: Delete old green artifact
+    command: cf delete {{ app_name }}-green -f
+    when: color == "blue"
+
+  - name: Delete old blue artifact
+    command: cf delete {{ app_name }}-blue -f
+    when: color == "green"

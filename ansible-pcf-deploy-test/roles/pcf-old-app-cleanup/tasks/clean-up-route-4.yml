@@ -1,0 +1,10 @@
+  - name: Clean up from route 4
+    debug: msg="To clean up route 4, deleting old artifact"
+
+  - name: Delete old green artifact
+    command: cf delete {{ app_name }}-green -f
+    when: color == "blue"
+
+  - name: Delete old blue artifact
+    command: cf delete {{ app_name }}-blue -f
+    when: color == "green"

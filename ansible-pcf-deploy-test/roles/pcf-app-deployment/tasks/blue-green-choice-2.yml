@@ -1,0 +1,10 @@
+  - name: Keeping old artifact; but routing all traffic to new artifact
+    debug: msg="Keeping old artifact; but routing all traffic to new artifact; Route to old artifact route is unmapped"
+    
+  - name: Unmapping artifact route to old green app
+    command: cf unmap-route {{ app_name }}-green app.pcf{{ domain_space }}.one.west.com -n {{ app_name }}
+    when: color == "blue"
+
+  - name: Unmapping artifact route to old blue app
+    command: cf unmap-route {{ app_name }}-blue app.pcf{{ domain_space }}.one.west.com -n {{ app_name }}
+    when: color == "green"

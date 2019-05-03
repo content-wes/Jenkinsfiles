@@ -1,0 +1,9 @@
+  - name: Set blue/green route choice
+    set_fact: blue_green_route=2
+    when: blue_green_route is undefined
+
+  - name: Print blue/green route choices and selected choice
+    debug: 
+      msg:
+        - "Choices 1) Delete old app 2) Keep old; Route traffic to new app (DEFAULT-OPTION) 3) Keep old; Do not route traffic to new app 4) Keep old, loadbalance between old and new"
+        - "Choice taken {{ blue_green_route }}"

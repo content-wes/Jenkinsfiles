@@ -1,0 +1,18 @@
+  - name: Rollback from route 2 deploy
+    debug: msg="Route all traffic to old app; Delete new app"
+
+  - name: Mapping route to old blue app
+    command: cf map-route {{ app_name }}-blue app.pcf{{ domain_space }}.one.west.com -n {{ app_name }}
+    when: color == "green"
+
+  - name: Mapping route to old green app
+    command: cf map-route {{ app_name }}-green app.pcf{{ domain_space }}.one.west.com -n {{ app_name }}
+    when: color == "blue"
+
+  - name: Delete new green artifact
+    command: cf delete {{ app_name }}-green -f
+    when: color == "green"
+
+  - name: Delete new blue artifact
+    command: cf delete {{ app_name }}-blue -f
+    when: color == "blue"

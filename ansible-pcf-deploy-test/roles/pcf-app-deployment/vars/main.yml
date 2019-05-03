@@ -1,0 +1,7 @@
+---
+  api_endpoint: api.sys.pcfdev.one.west.com
+  user: wicansbp
+  password: wicansbp
+  org: CXMO
+  git_base_url: http://cxmoutbounduser:cxmoutbounduser@led32121.wic.west.com/BrickHouse/
+  packaging: jar
