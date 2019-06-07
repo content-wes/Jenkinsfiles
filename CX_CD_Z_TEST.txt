@@ -1,19 +1,13 @@
 #!groovy
-JOB_TEMPLATE = "PCF OUTREACH PUSH"
-ARTIFACTORY_BASE = 'https://artifacts.west.com/artifactory'
-def SPARK_ROOMS = [[spaceId: 'bae74460-2003-11e9-93f5-79144611fddb', spaceName: 'CXMO Builds']]
-SPARK_CREDENTIAL_ID = 'spark-CXMO-Jenkins-Bot-token'
+JOB_TEMPLATE = "ANSIBLE TOWER TEMPLATE"
+ARTIFACTORY_BASE = 'ARTIAFCTORY URL'
+def SPARK_ROOMS  = [[spaceId: 'ID', spaceName: 'NAME OF SPACE']]
+SPARK_CREDENTIAL_ID = 'CREDIANTIALS'
 DEFAULT_EMAIL = ''
-DEFAULT_MVN_GROUPID = 'com.west.cxm'
-api_endpoint_dev = 'api.sys.pcfdev.one.west.com'
-api_endpoint_ops = 'api.sys.den06.pcf.one.west.com'
-api_endpoint = api_endpoint_dev
-space_subdomain = ''
-app_version = ''
-app_links = ''
+DEFAULT_MVN_GROUPID = 'MVN ID'
 pipeline {
     agent {
-        label 'RHEL7'
+        label 'NAME'
     }
     tools {
         jdk 'openjdk-1.8'
