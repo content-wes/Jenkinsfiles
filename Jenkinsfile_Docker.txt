@@ -1,0 +1,584 @@
+branchName = env.BRANCH_NAME
+
+echo "branch name: ${branchName}"
+buildNumber = env.BUILD_NUMBER
+echo "build number: ${buildNumber}"
+isMaster = branchName == "master"
+isPullRequest = branchName.startsWith("PR")
+isFeatureBranch = branchName.startsWith("crp")
+repoOrg = "${env.JOB_NAME}".tokenize('/')[0]
+repoName = "${env.JOB_NAME}".tokenize('/')[1]
+def Artifactory_Name
+def QA_Resolver_Repo
+def Dev_Resolver_Repo
+def Docker_Repo
+DB_BUILD = false
+def MVN_GROUPID
+def MVN_ARTIFACTID
+def MVN_VERSION
+def server
+def rtMaven
+def rtDocker
+def buildInfo
+def buildInfo1
+sqaEmailId = "example@west.com"
+def user_email
+def email_link
+
+// Check a folder if changed in the latest commit.
+// Returns true if changed, or false if no changes.
+def checkFolderForDiffs(path) {
+  try {
+    sh "git diff --quiet --exit-code HEAD~1..HEAD ${path}"
+    return false
+  } catch (err) {
+    return true
+  }
+}
+// culprits: Sends email to the list of users who committed a change since the last non-broken build till now
+// developers: Sends email to all the people who caused a change in the change set
+// requester: Sends email to the user who initiated the build
+// upstream committers: Sends email to the list of users who committed changes in upstream builds that triggered this build.
+def emailProviders = [ [$class: 'CulpritsRecipientProvider'], [$class: 'DevelopersRecipientProvider'], [$class: 'RequesterRecipientProvider'], [$class: 'UpstreamComitterRecipientProvider'] ];
+
+pipeline {
+  // run the pipeline on the RHEL7 slaves  (there are also windows and MAC slaves) - default is RHEL7
+  agent {
+    label 'RHEL7'
+    //		label 'CS_TestComplete'
+  }
+  // specifies which tools to use to build the app
+  tools {
+    maven 'maven-default'
+    jdk 'openjdk-1.8'
+  }
+  // setting up env variables
+  environment {
+    JAVA_HOME = "${tool 'openjdk-1.8'}"
+    PATH = "${JAVA_HOME}/bin:${PATH}"
+    // credentials('<ID>') where ID is the ID of the defined credential in Jenkins
+    K8S_DEV_AUTH = credentials('5e61e424-a619-4a0e-a62d-acb0d09b56c5')
+    K8S_SQA_AUTH = credentials('87e878c3-eda6-4292-9bbb-e7332cc7404a')
+    K8S_DEV_DB_CREDS = credentials('d85a8472-7cd3-40e2-bb05-54fdac52a7ec')
+    K8S_SQA_DB_CREDS = credentials('d85a8472-7cd3-40e2-bb05-54fdac52a7ec')
+    KEYSTORE_PASSWORD = credentials('e487b83d-369b-4d9b-b158-0d37e05e0fb4')
+    TEST_COMPLETE_CREDS = credentials('6ba38279-546c-48d6-9147-c0e3a3b85453')
+  }
+  parameters {
+    // SNAPSHOT build dev image; QA builds new QA image, RELEASE copies last QA build image
+    choice(choices: 'SNAPSHOT\nQA\nRELEASE', description: 'What type of build?', name: 'BUILD')
+    // for the RELEASE build, pass in the the image to use i.e. version and build number
+    string(name: 'image_tag', defaultValue: '', description: 'Docker Image tag')
+    string(name: 'database_tag', defaultValue: '', description: 'Database Package tag')
+  }
+  // will not allow 2 builds to run at the same time
+  options { disableConcurrentBuilds() }
+  stages {
+    // clone the code from git to the jenkins workspace
+    stage('checkout') {
+      when {
+        expression { !isMaster }
+      }
+      steps {
+        script {
+          deleteDir()
+          checkout scm
+        }
+      }
+    }
+    stage ('Set Variables') {
+      when {
+        expression { !isMaster }
+      }
+      steps {
+        script {
+          // read the pom files
+          def mvnPom = readMavenPom file: 'pom.xml'
+          // save the group id, artifact id, and version as environment vars for use later
+          MVN_GROUPID = "${mvnPom.groupId}"
+          if (MVN_GROUPID == null || MVN_GROUPID == '' || MVN_GROUPID == 'null') {
+            MVN_GROUPID = "${mvnPom.parent.groupId}"
+          }
+            MVN_ARTIFACTID = "${mvnPom.artifactId}"
+
+            MVN_VERSION = "${mvnPom.version}"
+            echo "${MVN_VERSION}"
+            commitInfo = sh (script: "git --no-pager show -s", returnStdout: true).trim()
+            // set the release version
+            tag = "${MVN_VERSION}"
+            tag = tag.trim()
+            releaseVersion = tag.split('-').first()
+            sh "echo releaseVersion ${releaseVersion}"
+            user_email = sh(script: "git --no-pager show -s --format='%ae'", returnStdout: true).trim()
+            echo "${user_email}"
+            // Define the email txt / link after successful dev build
+            email_link = "<hr>Notify QA : <a href='mailto:${sqaEmailId}?Subject=Dev Testing is SUCCESS for ${repoName} &body=The build  ${env.BUILD_DISPLAY_NAME} for ${repoName} is ready for testing. Please Build with Parameters in Jenkins selecting RELEASE for the build type'>Click here</a><br/>"
+            // set the artifactory artifact location
+            if (params.BUILD == 'SNAPSHOT')  {
+              Artifactory_Name = "Safety-Systems-maven-dev"
+              Dev_Resolver_Repo = "Safety-Systems-maven-dev"
+              docker_image_tag = "Docker Image Tag - ${MVN_VERSION}.${env.BUILD_NUMBER}"
+            } else if (params.BUILD == 'QA') {
+              Artifactory_Name = "Safety-Systems-maven-qa"
+              QA_Resolver_Repo = "Safety-Systems-maven-qa"
+              docker_image_tag = "Docker Image Tag - ${releaseVersion}.${env.BUILD_NUMBER}"
+            } else {
+              docker_image_tag = ''
+            }
+            // determine if the crp/database directory has any code changes
+            if ( checkFolderForDiffs('database/') ) {
+              DB_BUILD = true
+            } else {
+              DB_BUILD= false
+            }
+            if ( DB_BUILD ) {
+              database_package_version = "Database Package Version - ${releaseVersion}.${env.BUILD_NUMBER}"
+            } else {
+              database_package_version = ''
+            }
+            // set the artifactory docker location
+            Docker_Repo = "DOCKER REPO"
+            email_link = "<hr>If DEV Build is SUCCESS Notify QA : <a href='mailto:${sqaEmailId}?Subject=Dev Testing is SUCCESS for ${repoName} &body=The build  ${env.BUILD_DISPLAY_NAME} for ${repoName} is ready for testing.%0D%0APlease Build with Parameters in Jenkins selecting QA for the build type%0D%0A${database_package_version}'>Click here</a><br/>"
+          }
+        }
+      }
+      // tar up the crp/database directory if there have been code changes
+      // should this only be done for snapshot images??
+      stage ('Package Database Folder') {
+        when {
+          expression { !isFeatureBranch }
+        }
+        steps {
+          script {
+            if ( DB_BUILD ) {
+              sh "tar -cvf database-${MVN_VERSION}.${env.BUILD_NUMBER}.tar database"
+              sh "tar -cvf database-${releaseVersion}.${env.BUILD_NUMBER}.tar database"
+            }
+          }
+        }
+      }
+      // upload the database tar file to the artifactory
+      stage ('Upload database package to Artifactory') {
+        when {
+          expression { !isFeatureBranch }
+        }
+        steps {
+          script {
+            if ( DB_BUILD ) {
+              server = Artifactory.server('artifacts')
+              def uploadSpec  =  """{
+              "files": [
+              {
+              "pattern": "database-${MVN_VERSION}.${env.BUILD_NUMBER}.tar",
+              "target": "Safety-Systems-maven-dev/com/sfs/crp/database/"
+              },
+              {
+              "pattern": "database-${releaseVersion}.${env.BUILD_NUMBER}.tar",
+              "target": "Safety-Systems-maven-qa/com/sfs/crp/database/"
+              }
+              ]
+              }"""
+              def buildInfo2 = server.upload(uploadSpec)
+              server.publishBuildInfo(buildInfo2)
+            }
+          }
+        }
+      }
+      stage('Build') {
+        // when snapshot build for dev or feature then run the steps below it
+        when {
+          expression { params.BUILD == 'SNAPSHOT' && !isMaster}
+        }
+        steps {
+          script {
+            // compile the source code of the project
+            sh 'mvn clean compile'
+            sh "echo ${params.BUILD}"
+          }
+        }
+      }
+      stage('Test') {
+        when {
+          expression { params.BUILD == 'SNAPSHOT' && !isMaster}
+        }
+        steps {
+          script {
+            // Test the compiled source code using a suitable unit testing framework.
+            // These tests should not require the code to be packaged or deployed
+            sh 'mvn test -q -DskipTests=false'
+          }
+        }
+      }
+      stage('SonarQube analysis') {
+        when {
+          expression {
+            params.BUILD == 'SNAPSHOT' && !isMaster
+          }
+        }
+        steps {
+          script {
+            def scannerHome = tool 'SonarQube'
+            // set the SonarQube server to use
+            // Connection details you have configured in Jenkins global
+            // configuration and will be automatically passed to the scanner
+            withSonarQubeEnv('sonarQube') {
+              sh "${scannerHome}/bin/sonar-scanner"
+            }
+            timeout(time: 10, unit: 'MINUTES') {
+              // pauses the pipeline until SonarQube analysis is completed and returns quality gate status
+              def qg = waitForQualityGate()
+              if (qg.status != 'OK') {
+                error "Pipeline aborted due to Quality Gate Failure: ${qg.status}"
+              }
+            }
+          } // scripts
+        }
+      }
+      stage('Package') {
+        // only want to package for a snapshot build i.e. dev branch
+        when {
+          expression {
+            //    params.BUILD == 'SNAPSHOT' && !isFeatureBranch && !isMaster && !isPullRequest
+            params.BUILD == 'SNAPSHOT' // && !isFeatureBranch && !isMaster && !isPullRequest
+          }
+        }
+        steps {
+          script {
+            // take the compiled code and package it in its distributable format, i.e. JAR or WAR
+            // don't re-run the unit test since it was done in the previous stage
+            sh 'mvn package -q -DskipTests=true'
+          }
+        }
+      }
+      // push the artifact (war, jar) to the artifactory
+      stage('snapshot') {
+        when {
+          expression {
+            //    params.BUILD == 'SNAPSHOT' && !isFeatureBranch && !isMaster && !isPullRequest
+            params.BUILD == 'SNAPSHOT' // && !isFeatureBranch && !isMaster && !isPullRequest
+          }
+        }
+        steps {
+          script {
+            sh "echo ${params.BUILD}"
+            server = Artifactory.server('artifacts')
+            rtMaven = Artifactory.newMavenBuild()
+            rtMaven.deployer server: server,
+              releaseRepo: QA_Resolver_Repo.toString(),
+              snapshotRepo: Dev_Resolver_Repo.toString()
+
+            // compile, package and load to the artifactory but do not run unit tests
+            buildInfo = rtMaven.run pom: 'pom.xml', goals: 'clean install -DskipTests=true -Dartifactory.publish.buildInfo=true'
+            buildInfo.env.capture = true
+            // only keep 10 versions in the artifactory
+            buildInfo.retention maxBuilds: 10, deleteBuildArtifacts: true
+            server.publishBuildInfo buildInfo
+          }
+        }
+      }
+      // create the docker image and push the docker image to artifactory
+      stage('Docker build and push') {
+        when {
+          expression {
+            //    params.BUILD == 'SNAPSHOT' && !isFeatureBranch && !isMaster && !isPullRequest
+            params.BUILD == 'SNAPSHOT' // && !isFeatureBranch && !isMaster && !isPullRequest
+          }
+        }
+        steps {
+          script {
+            echo 'Pushing Image'
+            withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: 'artifactaccess', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]) {
+              sh "docker login -u $USERNAME -p $PASSWORD ${Docker_Repo}"
+              dir('Docker') {
+                sh "docker build -t ${Docker_Repo}/crp:${MVN_VERSION}.${env.BUILD_NUMBER} \
+                --build-arg version=${MVN_VERSION} \
+                --build-arg root_repo=${Artifactory_Name} -f Dockerfile ."
+              }
+              sh "docker push ${Docker_Repo}/crp:${MVN_VERSION}.${env.BUILD_NUMBER}"
+            }
+          }
+        }
+      }
+      // deploy to the k8 cluster
+      stage('Dev K8s Deployment') {
+        when {
+          expression {
+            params.BUILD == 'SNAPSHOT' // && !isFeatureBranch && !isMaster && !isPullRequest
+            //  params.BUILD == 'SNAPSHOT' && !isFeatureBranch && !isMaster && !isPullRequest
+          }
+        }
+        steps {
+          script {
+            // the extraVars in the ansibleTower command replace the need to fill in
+            // the job templates survey variables - do not confuse this with the extra vars in
+            // the job template - they still need to be filled out if applicable
+            ansibleTower(
+              towerServer: 'towerServer',
+              templateType: 'job',
+              jobTemplate: 'CRP',
+              importTowerLogs: true,
+              inventory: 'CRP K8',
+              jobTags: '',
+              limit: '',
+              removeColor: false,
+              verbose: true,
+              credentials: '',
+              extraVars: "{'k8s_host': '$K8S_DEV_AUTH_USR', 'apikey': '$K8S_DEV_AUTH_PSW', 'deploy_env': 'dev', 'tag': '${MVN_VERSION}.${buildNumber}', 'DB_USERNAME': '$K8S_DEV_DB_CREDS_USR', 'DB_PASSWORD': '$K8S_DEV_DB_CREDS_PSW', 'KEYSTORE_PASSWORD': '$KEYSTORE_PASSWORD'}"
+            )
+          }
+        }
+      }
+      // using the maven release plugin create the release version for QA of the java artifact
+      // version number will contain build number for QA
+      stage('QA Release') {
+        when {
+          expression {
+            params.BUILD == 'QA' && !isMaster
+          }
+        }
+        steps{
+          sshagent(credentials:['scmaccess_ssh']){
+            script {
+              // setup access to the artifactory
+              sh 'git checkout ${GIT_BRANCH}'
+              sh 'echo ${GIT_BRANCH}'
+              server = Artifactory.server('artifacts')
+              rtMaven = Artifactory.newMavenBuild()
+              rtMaven.deployer.deployArtifacts = false
+              rtMaven.deployer server : server,
+                releaseRepo : QA_Resolver_Repo.toString(),
+                  snapshotRepo : Dev_Resolver_Repo.toString()
+              sh "echo ${params.BUILD}"
+              // maven release plugin requires the scm definition in the pom file
+              // release:prepare checks for uncommitted changes,
+              // changes from x-snapshot to the release version, creates a tag,
+              // -B flag forces interactive mode
+              // where the release version and dev version are pulled from the -D parms set
+              // release:perform - checkout from an SCM URL with optional tag,
+              // forks a new Maven instance to build
+              // the checked out code and release the project
+              // update the pom version number - since this requires a check-in,
+              // a new snapshot build is kicked off
+              buildInfo = rtMaven.run pom : 'pom.xml',
+                goals: "release:clean release:prepare -B -Darguments=\"-Dmaven.test.skip=true -Dmaven.javadoc.skip=true -DignoreSnapshots=true\" release:perform -DskipTests=true -Dgoals=install -Dartifactory.publish.buildInfo=true -DreleaseVersion=${releaseVersion}.${buildNumber} -DdevelopmentVersion=${MVN_VERSION}".toString()
+              sh "echo ${params.BUILD}"
+              // store in artifactory
+              buildInfo = rtMaven.run pom : 'target/checkout/pom.xml',
+                goals: 'clean install -DskipTests=true -DignoreSnapshots=true'
+              rtMaven.deployer.deployArtifacts buildInfo\
+              server.publishBuildInfo buildInfo
+              sh "echo ${params.BUILD}"
+            }
+          }
+        }
+      }
+      // create the release version of the docker image and push to artifactory
+      stage('QA Docker Release') {
+        when {
+          expression {
+            params.BUILD == 'QA' && !isMaster
+          }
+        }
+        steps {
+          script {
+            echo 'Pushing QA Release Image'
+            withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: 'artifactaccess', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]) {
+              // invoke docker to create the docker image with the specified version number
+              sh "docker login -u $USERNAME -p $PASSWORD ${Docker_Repo}"
+              dir('Docker'){
+                sh "docker build -t ${Docker_Repo}/crp:${releaseVersion}.${buildNumber} \
+                --build-arg version=${releaseVersion}.${buildNumber} \
+                --build-arg root_repo=${Artifactory_Name} -f Dockerfile ."
+              }
+              // push the new docker image to the docker repo in artifactory
+              sh "docker push ${Docker_Repo}/crp:${releaseVersion}.${buildNumber}"
+            }
+          }
+        }
+      }
+      stage('QA K8s Deployment') {
+        when {
+          expression {
+            params.BUILD == 'QA' && !isMaster
+          }
+        }
+        steps {
+          script {
+            ansibleTower(
+              towerServer: 'towerServer',
+              templateType: 'job',
+              jobTemplate: 'CRP',
+              importTowerLogs: true,
+              inventory: 'CRP K8',
+              jobTags: '',
+              limit: '',
+              removeColor: false,
+              verbose: true,
+              credentials: '',
+              extraVars: "{'k8s_host': '$K8S_SQA_AUTH_USR', 'apikey': '$K8S_SQA_AUTH_PSW', 'deploy_env': 'sqa', 'tag': '${releaseVersion}.${buildNumber}', 'DB_USERNAME': '$K8S_SQA_DB_CREDS_USR', 'DB_PASSWORD': '$K8S_SQA_DB_CREDS_PSW', 'KEYSTORE_PASSWORD': '$KEYSTORE_PASSWORD'}"
+            )
+          }
+        }
+      }
+      stage('TestComplete'){
+        when {
+          expression { params.BUILD == 'QA' && !isMaster }
+        }
+        agent {
+          label 'CS_TestComplete'
+        }
+        steps {
+          echo "in steps for TestComplete stage"
+          script {
+            try {
+              testcompletetest launchType: 'lcKdt',
+                project: 'CRP_GUI_TESTING',
+                suite: 'qa\\CRPProjectSuite\\QA_CRP_PROJECT_SUITE.pjs',
+                test: 'CRPRP311_Check_CRP_Header',
+                useTCService: true,
+                userName: "$TEST_COMPLETE_CREDS_USR",
+                userPassword: "$TEST_COMPLETE_CREDS_PSW",
+                commandLineArguments: '/ZephyrVersion:Dummy /ZephyrCycle:Auto'
+            } catch (err) {
+              echo "TestComplete Failed."
+            }
+          }  // script
+        }  // steps
+      }  // stage
+      stage('Download Database Package') {
+        when {
+          expression {
+            params.BUILD == 'RELEASE'
+          }
+        }
+        steps {
+          script {
+            server = Artifactory.server 'artifacts'
+            def downloadSpec = """{
+            "files": [
+            {
+            "pattern": "Safety-Systems-maven-qa/com/sfs/crp/database/database-${database_tag}.tar",
+            "target": "${WORKSPACE}/",
+            "flat": "true"
+            }
+            ]
+            }"""
+            def buildInfo3 =  server.download(downloadSpec)
+            server.publishBuildInfo(buildInfo3)
+          }
+        }
+      }
+      stage('Upload Database Package to Prod Artifactoey') {
+        when {
+          expression {
+            params.BUILD == 'RELEASE'
+          }
+        }
+        steps {
+          script {
+              server = Artifactory.server('artifacts')
+              def uploadSpec  =  """{
+              "files": [
+              {
+              "pattern": "database-${database_tag}.tar",
+              "target": "reponameinartifactory/com/sfs/crp/database/"
+              }
+              ]
+              }"""
+              def buildInfo4 = server.upload(uploadSpec)
+              server.publishBuildInfo(buildInfo4)
+            }
+          }
+        }
+      // take the docker image QA has tested and release that to prod by copying that image
+      stage('Prod Docker Release') {
+        when {
+          expression {
+            params.BUILD == 'RELEASE' && !isMaster
+          }
+        }
+        steps {
+          script {
+            echo 'Pushing Release Image'
+            withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: 'artifactaccess', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]) {
+              // invoke docker to create the docker image with the specified version number
+              sh "docker login -u $USERNAME -p $PASSWORD ${Docker_Repo}"
+              sh "docker pull ${Docker_Repo}/crp:${image_tag}"
+              sh "docker tag ${Docker_Repo}/crp:${image_tag} ${Docker_Repo}/crp:${image_tag}-final"
+              // push the new docker image to the docker repo in artifactory
+              sh "docker push ${Docker_Repo}/crp:${image_tag}-final"
+            }
+          }
+        }
+      }
+    } // stages
+    post {
+      success {
+        echo sh(returnStdout: true, script: 'env | sort')
+        // use the email extension plugin
+        emailext to: "${user_email}",
+          recipientProviders: emailProviders,
+          subject: "Build ${currentBuild.currentResult} ${repoName} : ${env.BRANCH_NAME} ${env.BUILD_DISPLAY_NAME}",
+          body: """
+          <b>Jenkins Job</b> <a href='${env.JOB_URL}'>${env.JOB_NAME}</a></br>
+          Build ${env.BUILD_DISPLAY_NAME} ran for ${currentBuild.duration} ms on node ${env.NODE_NAME}[${env.EXECUTOR_NUMBER}] with labels (${env.NODE_LABELS})
+          <ul><li><a href='${env.BUILD_URL}'>Jenkins Build Summary</a> (${currentBuild.currentResult})</li>
+          <li><a href='${env.RUN_CHANGES_DISPLAY_URL}'>Change Summary</a></li>
+          <li><a href='${env.JOB_DISPLAY_URL}'>Jenkins Pipeline</a></li>
+          <b>Maven Coordinates</b><pre>
+          &lt;groupId&gt;${MVN_GROUPID}&lt;/groupId&gt;
+          &lt;artifactId&gt;${MVN_ARTIFACTID}&lt;/artifactId&gt;
+          &lt;version&gt;${MVN_VERSION}&lt;/version&gt;
+          </pre><br/>
+          <b>Git Repository</b> <a href='${env.GIT_URL}'>${repoOrg}/${repoName}</a> (${env.GIT_BRANCH})<br/>
+          <pre>${commitInfo}</pre></br>
+          ${docker_image_tag}
+          ${email_link}
+          """,
+          mimeType: 'text/html',
+          attachLog: true
+      }
+      failure {
+        emailext to: "${user_email}",
+          recipientProviders: emailProviders,
+          subject: "Build ${currentBuild.currentResult} ${repoName} : ${env.BRANCH_NAME} ${env.BUILD_DISPLAY_NAME}",
+          body: """
+          <b>Jenkins Job</b> <a href='${env.JOB_URL}'>${env.JOB_NAME}</a></br>
+          Build ${env.BUILD_DISPLAY_NAME} ran for ${currentBuild.duration} ms on node ${env.NODE_NAME}[${env.EXECUTOR_NUMBER}] with labels (${env.NODE_LABELS})
+          <ul><li><a href='${env.BUILD_URL}'>Jenkins Build Summary</a> (${currentBuild.currentResult})</li>
+          <li><a href='${env.RUN_CHANGES_DISPLAY_URL}'>Change Summary</a></li>
+          <li><a href='${env.JOB_DISPLAY_URL}'>Jenkins Pipeline</a></li>
+          <b>Maven Coordinates</b><pre>
+          &lt;groupId&gt;${MVN_GROUPID}&lt;/groupId&gt;
+          &lt;artifactId&gt;${MVN_ARTIFACTID}&lt;/artifactId&gt;
+          &lt;version&gt;${MVN_VERSION}&lt;/version&gt;
+          </pre><br/>
+          <b>Git Repository</b> <a href='${env.GIT_URL}'>${repoOrg}/${repoName}</a> (${env.GIT_BRANCH})<br/>
+          <pre>${commitInfo}</pre></br>
+          """,
+          mimeType: 'text/html',
+          attachLog: true
+      }
+      aborted {
+        emailext to: "${user_email}",
+          recipientProviders: emailProviders,
+          subject: "Build ${currentBuild.currentResult} ${repoName} : ${env.BRANCH_NAME} ${env.BUILD_DISPLAY_NAME}",
+          body: """
+          <b>Jenkins Job</b> <a href='${env.JOB_URL}'>${env.JOB_NAME}</a></br>
+          Build ${env.BUILD_DISPLAY_NAME} ran for ${currentBuild.duration} ms on node ${env.NODE_NAME}[${env.EXECUTOR_NUMBER}] with labels (${env.NODE_LABELS})
+          <ul><li><a href='${env.BUILD_URL}'>Jenkins Build Summary</a> (${currentBuild.currentResult})</li>
+          <li><a href='${env.RUN_CHANGES_DISPLAY_URL}'>Change Summary</a></li>
+          <li><a href='${env.JOB_DISPLAY_URL}'>Jenkins Pipeline</a></li>
+          <b>Maven Coordinates</b><pre>
+          &lt;groupId&gt;${MVN_GROUPID}&lt;/groupId&gt;
+          &lt;artifactId&gt;${MVN_ARTIFACTID}&lt;/artifactId&gt;
+          &lt;version&gt;${MVN_VERSION}&lt;/version&gt;
+          </pre><br/>
+          <b>Git Repository</b> <a href='${env.GIT_URL}'>${repoOrg}/${repoName}</a> (${env.GIT_BRANCH})<br/>
+          <pre>${commitInfo}</pre></br>
+          """,
+          mimeType: 'text/html',
+          attachLog: true
+      }
+    }  // post
+  }  // pipeline
