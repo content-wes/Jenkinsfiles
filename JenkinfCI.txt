@@ -1,0 +1,369 @@
+#!groovy
+// --- flags ---
+ignoreQualityGate = false
+ignoreXray = false
+// --- 'replay' flags
+bumpSnapshots = false 
+purgeSnapshots = false
+// --- Configuration "constants" --- 
+REPO_BASE = 'https://repo.west.com'
+SONAR_BASE = 'https://sonar.swn01.west.com/dashboard?id='
+ARTIFACTORY_BASE = 'https://artifacts.west.com/artifactory'
+ARTIFACTORY_SNAPSHOT_REPO = 'Customer-Experience-maven-dev'
+ARTIFACTORY_RELEASES_REPO = 'Customer-Experience-maven-qa'
+CXMO_DEPLOY_JOB='https://build.west.com/job/Customer-Experience/job/cxmo-ansible-pcf-deploy/job/test'
+CXMO_DEPLOY_TARGETS = [ 'GCP-Dev', 'GCP-Test' ]
+EMAIL_PROVIDERS = [ [$class: 'CulpritsRecipientProvider'], [$class: 'DevelopersRecipientProvider'], [$class: 'RequesterRecipientProvider'] ];
+def SPARK_ROOMS = [[spaceId: 'bae74460-2003-11e9-93f5-79144611fddb', spaceName: 'CXMO Outreach Builds']]
+SPARK_CREDENTIAL_ID = 'spark-CXMO-Jenkins-Bot-token'
+// --- Fixed variables calculated ONCE --- 
+repoOrg = "${env.JOB_NAME}".tokenize('/')[0]
+repoName = "${env.JOB_NAME}".tokenize('/')[1]
+isPullRequest = "${env.BRANCH_NAME}".startsWith("PR")
+isTag = "${env.BRANCH_NAME}".startsWith("${env.TAG_NAME}")
+isMaster = "${env.BRANCH_NAME}" == "master"
+isDevelop = "${env.BRANCH_NAME}" == "develop"
+// --- Mutable variables set in stage 'Check Variables' --- 
+isSnapshot = true
+isPom = false
+isDisabled = false
+isPublishable = true
+mvn_groupId = ''
+mvn_artifactId = ''
+mvn_version = ''
+artifactory_http_dir = ''
+// --- Variables for notification report ---
+link_tests = '<li>No Unit Tests</li>'
+link_sonar = '<li>Sonar Not Completed</li>'
+link_artifactory_build = '<li>Build Info Not Published</li>'
+link_artifactory_repo = '<li>Artifact Not Published</li>'
+link_xray = '<li>Xray skipped</li>'
+link_deploy_job = ''
+announce = ''
+commit_info = ''
+pipeline {
+    agent {
+        label 'RHEL7'
+    }
+    tools {
+        maven 'maven-default'
+        jdk 'openjdk-1.8'
+    }
+    environment {
+        JAVA_HOME="${tool 'openjdk-1.8'}"
+        PATH="${JAVA_HOME}/bin:${PATH}"
+    }
+    options {
+        disableConcurrentBuilds()
+    }
+    stages {
+        stage ('Clean Checkout') {
+            steps {
+                //'pushChanges' method (near end of file) requires checkout done with same ssh credentials
+                sshagent (credentials: ['scmaccess_ssh']) {
+                    sh "git clean -d -f -f"
+                    sh "git checkout ${env.GIT_BRANCH}"
+                    sh "git pull"
+                }
+                sh 'mvn clean'
+            }
+        }
+        stage ('Check Variables') {
+            steps {
+                script {
+                    def mvnPom = readMavenPom file: 'pom.xml'
+                    mvn_groupId = "${mvnPom.groupId}"
+                    if (mvn_groupId == null || mvn_groupId == '' || mvn_groupId == 'null') {
+                        mvn_groupId = "${mvnPom.parent.groupId}"
+                    }
+                    mvn_artifactId = "${mvnPom.artifactId}"
+                    mvn_version = "${mvnPom.version}"
+                    if (mvn_version == null || mvn_version == '' || mvn_version == 'null') {
+                        mvn_version = "${mvnPom.parent.version}"
+                    }
+                    currentBuild.description = "v ${mvn_version}"
+                    isSnapshot = mvn_version.contains('SNAPSHOT')
+                    isPom = ('pom' == "${mvnPom.packaging}")
+                    echo "${mvn_groupId} : ${mvn_artifactId} : ${mvn_version}"
+                    if (isSnapshot) {
+                        mvn_repo = ARTIFACTORY_SNAPSHOT_REPO
+                    } else {
+                        mvn_repo = ARTIFACTORY_RELEASES_REPO
+                    }
+                    repo_sub_dir = mvn_groupId.replaceAll(/\./,'/')
+                    artifactory_http_dir = "${ARTIFACTORY_BASE}/${mvn_repo}/${repo_sub_dir}/${mvn_artifactId}/${mvn_version}"
+                    commit_info = sh (script: "git --no-pager log --since='yesterday' --max-count=3 --name-status --format=tformat:'%ncommit %h at %ci by %cn<%ce>%n%B'", returnStdout: true).trim()
+                    
+                    echoFlags("PreCheck")
+                    if (isTag) {
+                        addNotification("Job was aborted (but shows 'SUCCESS') because tag 'branches' do not get rebuilt.")
+                        disableJob(false)
+                    }
+                     
+                    if (isPullRequest) {
+                       addNotification("Successful builds from pull requests are NOT published to Artifactory.")
+                       isPublishable = false
+                    } 
+                    
+                    if (isMaster) {
+                        if (isSnapshot) {
+                            sh "mvn build-helper:parse-version versions:set -DremoveSnapshot=true"
+                            if (!isPom) {
+                                sh "mvn versions:update-parent -U"
+                                sh "mvn versions:use-releases -U"
+                            }
+                            addNotification("removing -SNAPSHOT and triggering new job (no SNAPSHOTS on '${env.BRANCH_NAME}' branch)")
+                            pushChanges("remove SNAPSHOT")
+                            disableJob(true)
+                        }
+                    } else if (bumpSnapshots) {
+                        sh "mvn build-helper:parse-version versions:set -DnewVersion=\\\${parsedVersion.majorVersion}.\\\${parsedVersion.minorVersion}.\\\${parsedVersion.nextIncrementalVersion}-SNAPSHOT"
+                        if (isPom) {
+                            sh "mvn -N versions:update-child-modules"
+                        } else {
+                        //TODO parameters for updating parent, dependencies & allowSnapshots
+                            sh "mvn dependency:purge-local-repository -DsnapshotsOnly=true -Dinclude=${mvn_groupId}"
+                            sh "mvn versions:update-parent -DallowSnapshots=true -U"
+                            sh "mvn versions:use-releases -U"
+                            sh "mvn versions:use-latest-versions -DallowShapshots=true -U"
+                            sh "mvn versions:use-latest-snapshots -DallowShapshots=true -U"
+                        }
+                        addNotification("bumping artifact to next SNAPSHOT, updating parent and dependencies, triggering new build")
+                        pushChanges("bump SNAPSHOT")
+                        disableJob(false)
+                    } 
+                    
+                    if (!isSnapshot && isPublishable) {
+                        //we do this check because Artifactory violates the Maven convention of disallowing re-upload of existing versions
+                        artifact_url = "${artifactory_http_dir}/${mvn_artifactId}-${mvn_version}.pom"
+                        response = sh (script: "curl --head --silent ${artifact_url} | grep 'HTTP' | awk -F ' ' '{print \$2}'", returnStdout: true).trim()
+                        echo "received HTTP ${response}"
+                        if ('200'==response) {
+                           addNotification("This build is NOT publishable because ${mvn_artifactId}:${mvn_version} has already been published.")
+                           isPublishable = false
+                        }
+                    }
+                    
+                    echoFlags("PostCheck")
+                    
+                    if (!isDisabled && isSnapshot && purgeSnapshots) {
+                        sh "mvn dependency:purge-local-repository -DsnapshotsOnly=true -Dinclude=${mvn_groupId}"
+                    }
+                }
+            }
+        }
+        stage ('Build & Test') {
+            when {
+                expression { !isDisabled }
+            }
+            steps {
+                sh 'mvn clean verify -U'
+            }
+        }
+        stage ('SonarQube Analysis') {
+            when {
+                expression { !isDisabled && fileExists('sonar-project.properties') }
+            }
+            steps {
+                script {
+                    def scannerHome = tool 'SonarQube';
+                    withSonarQubeEnv('sonarQube') {
+                        sh "${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=${mvn_groupId}:${mvn_artifactId} -Dsonar.projectVersion=${mvn_version}-${env.BRANCH_NAME} -Dsonar.links.ci=${env.JOB_URL} -Dsonar.links.scm=${env.GIT_URL}"
+                    }
+                    link_sonar = "<li><a href='${SONAR_BASE}${mvn_groupId}:${mvn_artifactId}'>SonarQube Analysis</a></li>"
+                    if (ignoreQualityGate) {
+                           addNotification("SonarQube QualityGate is being ignored, please check report (and unset the 'ignoreQualityGate' flag if it actually passed)")
+                    }
+                    timeout(time: 10, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: !ignoreQualityGate
+                    }
+                }
+            }
+        }
+        stage ('Artifactory') {
+            when {
+                expression { !isDisabled && isPublishable }
+            }
+            steps {
+                script {
+                    initArtifactory()
+                    rtMaven.run pom: 'pom.xml', goals: 'install -DskipTests', buildInfo: buildInfo
+                    rtServer.publishBuildInfo buildInfo
+                    link_artifactory_build = "<li><a href='${ARTIFACTORY_BASE}/webapp/#/builds/${repoOrg}%20::%20${mvn_artifactId}%20::%20${env.BRANCH_NAME}/${env.BUILD_NUMBER}'>Artifactory Build Info</a></li>"
+                    link_artifactory_repo = "<li><a href='${artifactory_http_dir}'>Artifactory List View</a></li>"
+                    if (fileExists('manifest.yml')) {
+                        link_deploy_job  = "<hr>OPTIONAL: You can start a deploy job by clicking one of the links below.<br/>"
+                        if (isSnapshot) {
+                            link_deploy_job += "Note that deploys of SNAPSHOT versions will always use the <b>latest</b> build of that SNAPSHOT version -- even if it comes from a different branch. You can ensure the deployment of a specific build by using deploy job <a href='${CXMO_DEPLOY_JOB}/build'>form</a> and setting the appropriate '*_location' parameters based on the urls of the objects in ${artifactory_http_dir}.<br/>"
+                        }
+                        link_deploy_job += "Deploy <b>${mvn_artifactId}:${mvn_version}</b>  to: " + deployLinks()
+                    }
+                }
+            }
+        }
+        stage ('Xray') {
+            when {
+                expression { !isDisabled && isPublishable }
+            }
+            steps {
+                script {
+                    def scanConfig = ['buildName' : buildInfo.name,'buildNumber' : buildInfo.number, 'failBuild' : false]
+                    def scanResult = rtServer.xrayScan scanConfig
+                    def resultString = scanResult as String
+                    def json = readJSON text: resultString
+                    def xray_url = json['summary']['more_details_url']
+                    def alerts = json['summary']['total_alerts']
+                    link_xray = "<li><a href='${xray_url}'>Xray Scan Report</a></li>"
+                    addNotification(json['summary']['message'])
+                    if (alerts > 0) {
+                        echo resultString
+                        def ignoreReason = "(because this is a SNAPSHOT build)"
+                        if (ignoreXray) {
+                               ignoreReason = "(because Jenkinsfile specifies 'ignoreXray = true')"
+                           }
+                        if (!isSnapshot && !ignoreXray) {
+                            error "Xray scan failure"
+                        } else {
+                            addNotification("<b>FATAL</b>  Xray result is being ignored ${ignoreReason}, so build is flagged <b>UNSTABLE</b>")
+                            currentBuild.result = 'UNSTABLE'
+                        }
+                    }
+                }
+            }
+        }
+        stage ('Tag') {
+            when {
+                expression { !isDisabled && isPublishable && !isSnapshot && (currentBuild.currentResult=='SUCCESS') }
+            }
+            steps {
+                script {
+                    datetime = sh (script: "echo \$(date +'%Y%m%d%H%M%S')", returnStdout: true).trim()
+                    addNotification("Applying tag 'v${mvn_version}-${datetime}' Hooray! This build is a release candidate.")
+                    //TODO enable promotion to stage/prod Artifactory repo if regression suite passes
+                }
+                sshagent (credentials: ['scmaccess_ssh']) {
+                    sh("git tag -a v${mvn_version}-${datetime} -m '${env.BUILD_TAG}'")
+                    sh('git push --tags')
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                datetime = sh (script: "echo \$(date +'%Y-%m-%d @ %H:%M:%S')", returnStdout: true).trim()
+                def tests = findFiles glob: 'src/test/**/*Test*.java'
+                def results = findFiles glob: 'target/surefire-reports/*.xml'
+                if (tests.length > 0) {
+                    if (results.length > 0) {
+                        junit testResults: 'target/surefire-reports/*.xml'
+                        link_tests = "<li><a href='${env.BUILD_URL}testReport'>Unit Tests</a></li>"
+                    } else {
+                        if (!isDisabled && currentBuild.currentResult == 'SUCCESS') {
+                            addNotification("</br>There SHOULD have been test results!")
+                            currentBuild.result = 'UNSTABLE'
+                       }
+                    }
+                }
+                if (isPullRequest) {
+                    prNum = "${env.BRANCH_NAME}".tokenize('-')[1]
+                    repoBranch = "pull/${prNum}"
+                } else {
+                    repoBranch = "tree/${env.BRANCH_NAME}"
+                }
+                if (announce == '') {
+                    announceBlock = ''
+                } else {
+                    announceBlock = "<hr><b>NOTES re: Job ${env.BUILD_DISPLAY_NAME}</b>${announce}"
+                }
+                htmlReport = """
+---  ${datetime}  ---</br>
+<b>Jenkins Build Pipeline</b></br>
+<b><a href='${env.JOB_URL}'>${env.JOB_NAME}</a></b></br>
+Job ${env.BUILD_DISPLAY_NAME} ran for ${currentBuild.duration} ms on node ${env.NODE_NAME}[${env.EXECUTOR_NUMBER}] with labels (${env.NODE_LABELS})
+<ul><li><a href='${env.BUILD_URL}'>Jenkins Build Summary</a> (<b>${currentBuild.currentResult}</b>)</li>
+<li><a href='${env.RUN_CHANGES_DISPLAY_URL}'>Change Summary</a></li>
+<li><a href='${env.JOB_DISPLAY_URL}'>Pipeline Activity</a></li>
+${link_tests}${link_sonar}${link_artifactory_build}${link_artifactory_repo}${link_xray}</ul>
+<b>Maven Coordinates</b><pre>
+  &lt;groupId&gt;${mvn_groupId}&lt;/groupId&gt;
+  &lt;artifactId&gt;${mvn_artifactId}&lt;/artifactId&gt;
+  &lt;version&gt;${mvn_version}&lt;/version&gt;
+</pre><br/>
+<b>Git Repository</b> <a href='${REPO_BASE}/${repoOrg}/${repoName}'>${repoName}</a> / <a href='${REPO_BASE}/${repoOrg}/${repoName}/${repoBranch}'><b>${env.BRANCH_NAME}</b></a><br/>
+<pre>${commit_info}</pre></br>
+${link_deploy_job}
+${announceBlock}
+<hr>
+"""
+            }
+            sparkSend credentialsId: SPARK_CREDENTIAL_ID, messageType: 'html',
+                message: htmlReport,
+                spaceList: SPARK_ROOMS
+            echo sh(returnStdout: true, script: 'env | sort')
+            emailext recipientProviders: EMAIL_PROVIDERS,
+                subject: "Build ${currentBuild.currentResult} ${repoName} : ${env.BRANCH_NAME} ${env.BUILD_DISPLAY_NAME}",
+                body: htmlReport,
+                mimeType: 'text/html',
+                attachLog: true
+        }
+        success {
+            echo 'success :)'
+        }
+        unstable {
+            echo 'unstable :O'
+        }
+        failure {
+            echo 'failure :('
+        }
+        changed {
+            echo 'changed ;)'
+        }
+    }
+}
+def rtServer
+def rtMaven
+def buildInfo
+void initArtifactory() {
+    script {
+    //FIXME: use 'artifacts-swn01' instead of 'artifacts' until X-ray F5 DNS issue is resolved
+        rtServer = Artifactory.server('artifacts-swn01')
+        rtMaven = Artifactory.newMavenBuild()
+        rtMaven.resolver server: rtServer, releaseRepo: ARTIFACTORY_RELEASES_REPO, snapshotRepo: ARTIFACTORY_SNAPSHOT_REPO
+        rtMaven.deployer server: rtServer, releaseRepo: ARTIFACTORY_RELEASES_REPO, snapshotRepo: ARTIFACTORY_SNAPSHOT_REPO
+        buildInfo = Artifactory.newBuildInfo()
+        buildInfo.env.capture = true
+    }
+}
+void addNotification (messageString) {
+    announce += "</br>${messageString}"
+}
+void disableJob (reportAsAborted) {
+    if (reportAsAborted) {
+        currentBuild.result = 'ABORTED'
+    }
+    isDisabled = true
+    isPublishable = false
+}
+String deployLinks () {
+    links = ""
+    for (value in CXMO_DEPLOY_TARGETS) {
+            links += deployLink(value)
+        }
+    return links;
+}
+String deployLink (target) {
+    return "<a href='${CXMO_DEPLOY_JOB}/buildWithParameters?MVN_GROUPID=${mvn_groupId}&MVN_ARTIFACTID=${mvn_artifactId}&MVN_VERSION=${mvn_version}&pcf_deploy_target=${target}'>${target}</a>&nbsp;&nbsp;"
+}
+void pushChanges (messageString) {
+    sshagent (credentials: ['scmaccess_ssh']) {
+        sh "git config push.default current"
+        sh "git commit -a -m '${messageString}'"
+        sh "git push"
+    }
+}
+void echoFlags (prefix) {
+    echo "${prefix} SCM Flags -- isTag: ${isTag}, isMaster: ${isMaster}, isDevelop: ${isDevelop}, isPullRequest: ${isPullRequest}"
+    echo "${prefix} MVN Flags -- isPom: ${isPom}, isSnapshot: ${isSnapshot}"
+    echo "${prefix} JOB Flags -- isDisabled: ${isDisabled}, isPublishable: ${isPublishable}"
+}
